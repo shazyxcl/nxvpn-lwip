@@ -1,0 +1,100 @@
+name: Build tet
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Install NDK and CMake via sdkmanager
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;25.2.9519653" \
+            "cmake;3.22.1" \
+            --sdk_root=$ANDROID_SDK_ROOT
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmake/3.22.1/bin" >> $GITHUB_PATH
+
+      - name: Cache lwIP 2.2.0
+        id: cache-lwip
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/jni/lwip
+          key: lwip-2.2.0
+
+      - name: Download lwIP 2.2.0
+        if: steps.cache-lwip.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://download.savannah.nongnu.org/releases/lwip/lwip-2.2.0.zip" -O /tmp/lwip.zip
+          unzip -q /tmp/lwip.zip -d /tmp/lwip_src
+          mkdir -p app/src/main/jni/lwip
+          cp -r /tmp/lwip_src/lwip-2.2.0/. app/src/main/jni/lwip/
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Verify liblwip_tunnel.so
+        run: |
+          COUNT=$(find app/build -name "liblwip_tunnel.so" | wc -l)
+          echo "Found liblwip_tunnel.so: $COUNT"
+          find app/build -name "liblwip_tunnel.so" -exec ls -lh {} \;
+          if [ "$COUNT" -eq "0" ]; then
+            echo "ERROR: liblwip_tunnel.so not found"
+            exit 1
+          fi
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: kontolodon-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: kontolodon-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 7
+
+      - name: Upload native libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-libs-lwip
+          path: app/build/intermediates/cmake/**/obj/**/*.so
+          retention-days: 3
+          if-no-files-found: warn
